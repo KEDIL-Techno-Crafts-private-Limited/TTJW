@@ -79,12 +79,22 @@ void Error_Handler(void);
 #define PUSH_BUTTON_EXTI_IRQn EXTI0_IRQn
 #define ADS_DRDY_Pin GPIO_PIN_1
 #define ADS_DRDY_GPIO_Port GPIOB
+#define ALARM_LED_Pin GPIO_PIN_10
+#define ALARM_LED_GPIO_Port GPIOB
+#define PV_TM_CLK_Pin GPIO_PIN_9
+#define PV_TM_CLK_GPIO_Port GPIOA
+#define PV_TM_DIO_Pin GPIO_PIN_10
+#define PV_TM_DIO_GPIO_Port GPIOA
 #define TMS_Pin GPIO_PIN_13
 #define TMS_GPIO_Port GPIOA
 #define TCK_Pin GPIO_PIN_14
 #define TCK_GPIO_Port GPIOA
 #define SWO_Pin GPIO_PIN_3
 #define SWO_GPIO_Port GPIOB
+#define SV_TM_CLK_Pin GPIO_PIN_8
+#define SV_TM_CLK_GPIO_Port GPIOB
+#define SV_TM_DIO_Pin GPIO_PIN_9
+#define SV_TM_DIO_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

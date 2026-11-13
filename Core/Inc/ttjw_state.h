@@ -1,4 +1,3 @@
-/* Shared application state. Prefer module APIs over adding new shared variables. */
 #ifndef TTJW_STATE_H
 #define TTJW_STATE_H
 
@@ -6,26 +5,51 @@
 
 typedef enum
 {
-    DISPLAY_MODE_OPERATION = 0,
-    DISPLAY_MODE_ALARM1,
-    DISPLAY_MODE_ADJUSTMENT_MENU,
-    DISPLAY_MODE_ERROR_ADJUSTMENT,
-    DISPLAY_MODE_PID_P,
-    DISPLAY_MODE_PID_I,
-    DISPLAY_MODE_PID_D
-} DisplayMode_t;
+    UI_HOME = 0,
 
-/* Operator-adjustable values and current status shared between modules. */
-extern float g_setValue;             /* SV, degrees C; default 37.0 C. */
-extern float g_alarm1Value;          /* AL-1 threshold; 0.0 disables alarm. */
-extern uint8_t g_alarmActive;        /* Steady alarm state derived from valid PV. */
-extern uint8_t g_heaterDutyPercent;  /* Last commanded, quantized heater duty. */
-extern float g_errorAdjustment;      /* Signed PV calibration offset. */
+    /* Top-level menu choices */
+    UI_MENU_ADJ,
+    UI_MENU_SERV,
+
+    /* ADJ parameter browsing and editing */
+    UI_ADJ_UNIT,
+    UI_ADJ_UNIT_EDIT,
+    UI_ADJ_ALARM_TYPE,
+    UI_ADJ_ALARM_TYPE_EDIT,
+    UI_ADJ_ALARM_VALUE,
+    UI_ADJ_ALARM_VALUE_EDIT,
+    UI_ADJ_SFT,
+    UI_ADJ_SFT_EDIT,
+
+    /* SERV choices and frontend-only selected states */
+    UI_SERV_AUTO_CAL,
+    UI_SERV_AUTO_CAL_SELECTED,
+    UI_SERV_RESET,
+    UI_SERV_RESET_SELECTED
+} TTJW_UiState_t;
+
+typedef enum
+{
+    TEMP_UNIT_CELSIUS = 0,
+    TEMP_UNIT_FAHRENHEIT
+} TemperatureUnit_t;
+
+extern float g_setValue;
+extern float g_errorAdjustment;
 extern float g_pidPValue;
 extern float g_pidIValue;
 extern float g_pidDValue;
-extern DisplayMode_t g_displayMode;
-extern volatile uint8_t g_displayNeedsRefresh;
-extern float g_latestTemperature;    /* Most recently computed PV in degrees C. */
+extern float g_latestTemperature;       /* Corrected PV, Celsius internally. */
+extern float g_measuredTemperature;     /* Raw measured PV, Celsius. */
+extern float g_alarmValue;              /* Deviation, Celsius internally. */
 
-#endif /* TTJW_STATE_H */
+extern uint8_t g_alarmType;              /* 0=OFF, 1=UP, 2=LO, 3=P-L. */
+extern TemperatureUnit_t g_temperatureUnit;
+extern uint8_t g_heaterDutyPercent;
+extern TTJW_UiState_t g_uiState;
+extern volatile uint8_t g_displayNeedsRefresh;
+extern volatile uint8_t g_errorDisplayActive;
+extern volatile uint8_t g_sensorValid;
+extern volatile uint8_t g_alarmActive;
+
+#endif

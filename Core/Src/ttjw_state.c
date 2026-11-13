@@ -1,17 +1,22 @@
 #include "ttjw_state.h"
 
-/* Initial setpoint requested for the current TTJW firmware. */
+/* Process values and controller settings are stored in Celsius. */
 float g_setValue = 37.0f;
-float g_alarm1Value = 0.0f;
-uint8_t g_alarmActive = 0U;
-uint8_t g_heaterDutyPercent = 0U;
 float g_errorAdjustment = 0.0f;
-
-/* P retains the existing proportional gain; I and D remain operator-tunable. */
 float g_pidPValue = 30.0f;
 float g_pidIValue = 0.0f;
 float g_pidDValue = 0.0f;
 
-DisplayMode_t g_displayMode = DISPLAY_MODE_OPERATION;
-volatile uint8_t g_displayNeedsRefresh = 1U;
 float g_latestTemperature = 0.0f;
+float g_measuredTemperature = 0.0f;
+float g_alarmValue = 0.9f;
+
+uint8_t g_alarmType = 1U; /* UP */
+uint8_t g_heaterDutyPercent = 0U;
+TemperatureUnit_t g_temperatureUnit = TEMP_UNIT_CELSIUS;
+
+TTJW_UiState_t g_uiState = UI_HOME;
+volatile uint8_t g_displayNeedsRefresh = 1U;
+volatile uint8_t g_errorDisplayActive = 0U;
+volatile uint8_t g_sensorValid = 0U;
+volatile uint8_t g_alarmActive = 0U;

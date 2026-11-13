@@ -9,683 +9,480 @@
   *   - PT100 conversion
   *   - Heater/PID control
   *   - Matrix keypad
-  *   - SH1106 OLED
+  *   - Dual TM1637 seven-segment displays
   *   - Shared application state and configuration
   ******************************************************************************
   */
 /* USER CODE END Header */
-
+/* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "ttjw_config.h"
-#include "ttjw_state.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
 #include "ads1220.h"
 #include "pt100.h"
-#include "heater_control.h"
 #include "keypad.h"
-#include "oled_sh1106.h"
-#include <stdint.h>
+#include "ttjw_display.h"
+#include "ttjw_state.h"
+#include "heater_control.h"
+#include "ttjw_config.h"
 #include <limits.h>
+#include <math.h>
+/* USER CODE END Includes */
 
-/* HAL peripheral handles are owned by this board/application layer. */
-I2C_HandleTypeDef hi2c1;
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi1;
+
 TIM_HandleTypeDef htim1;
 
-/* CubeMX-generated board setup functions remain in main.c. */
+/* USER CODE BEGIN PV */
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM1_Init(void);
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+static uint8_t TTJW_AlarmEvaluate(float correctedPvC)
+{
+  float upper = g_setValue + g_alarmValue;
+  float lower = g_setValue - g_alarmValue;
+  uint8_t high = (correctedPvC >= upper) ? 1U : 0U;
+  uint8_t low = (correctedPvC <= lower) ? 1U : 0U;
+
+  switch (g_alarmType)
+  {
+    case 1U: return high;                    /* UP */
+    case 2U: return low;                     /* LO */
+    case 3U: return (high || low) ? 1U : 0U; /* P-L */
+    case 0U:
+    default: return 0U;                      /* OFF */
+  }
+}
 
 int main(void)
 {
-    int32_t raw;
-    float resistance;
-    float temperature;
+  int32_t raw;
+  float resistance;
+  float measuredC;
+  float correctedC;
+  uint8_t validSample;
 
+  HAL_Init();
+  SystemClock_Config();
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_TIM1_Init();
 
-    /* HAL initialization */
-    HAL_Init();
+  /* Integrated TTJW test: enable the complete keypad/menu interface. */
+  Keypad_Init();
+  TTJW_DisplayInit();
 
+  /* Start with a known-safe output state. */
+  HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin, GPIO_PIN_RESET);
+  g_heaterDutyPercent = 0U;
+  Heater_Init();
+  Heater_SetDuty(0U);
+  PID_Reset();
 
-    /* System clock */
-    SystemClock_Config();
+  HAL_GPIO_WritePin(ADS_CS_GPIO_Port, ADS_CS_Pin, GPIO_PIN_SET);
+  ADS1220_Reset();
+  ADS1220_WriteRegisters();
+  ADS1220_StartConversion();
 
+  g_setValue = 37.0f; /* Fixed test setpoint: 37.0 C. */
+  g_errorAdjustment = 0.0f;
+  g_temperatureUnit = TEMP_UNIT_CELSIUS;
+  g_uiState = UI_HOME;
+  g_latestTemperature = 0.0f;
+  g_measuredTemperature = 0.0f;
+  g_sensorValid = 0U;
+  g_errorDisplayActive = 1U;
+  TTJW_DisplayUpdate();
 
-    /* GPIO */
-    MX_GPIO_Init();
+  while (1)
+  {
+    /* Run the complete S1-S4 keypad/menu state machine. */
+    Keypad_Process();
 
+    raw = ADS1220_ReadConversion();
+    validSample = 0U;
 
-    /* I2C */
-    MX_I2C1_Init();
-
-
-    /* SPI */
-    MX_SPI1_Init();
-
-
-    /* TIM1 / heater PWM */
-    MX_TIM1_Init();
-    Heater_Init();
-
-
-    /* --------------------------------------------------------------------- */
-    /* OLED                                                                  */
-    /* --------------------------------------------------------------------- */
-
-    OLED_Init();
-
-
-    /* V1: no startup screen. Show the live main display immediately. */
-    /* --------------------------------------------------------------------- */
-    /* ADS1220                                                               */
-    /* --------------------------------------------------------------------- */
-
-    ADS1220_Reset();
-
-
-    /*
-     * Datasheet requires a delay after RESET before another command.
-     */
-    HAL_Delay(5);
-
-
-    /*
-     * Configure:
-     *
-     * REG0 = 66
-     * REG1 = 04
-     * REG2 = 55
-     * REG3 = 70
-     */
-    ADS1220_WriteRegisters();
-
-
-    HAL_Delay(5);
-
-
-    /*
-     * Start continuous conversion.
-     */
-    ADS1220_StartConversion();
-
-
-    HAL_Delay(100);
-
-
-    /*
-     * Matrix keypad starts with both columns HIGH.
-     */
-    Keypad_Init();
-
-
-    /* --------------------------------------------------------------------- */
-    /* MAIN LOOP                                                             */
-    /* --------------------------------------------------------------------- */
-
-    while (1)
+    if (raw != INT32_MIN)
     {
-        /*
-         * Process any keypad EXTI event from the main loop.
-         * The EXTI callback itself remains very short.
-         */
-        Keypad_Process();
-
-        /*
-         * Immediately redraw setting/navigation changes using the most recent
-         * PV. Previously the display was refreshed only after ADS1220 returned
-         * a conversion, making held-key changes appear delayed.
-         */
-        if (g_displayNeedsRefresh != 0U)
+      resistance = CalculateResistance(raw);
+      if (isfinite(resistance) &&
+          (resistance >= TTJW_PT100_RESISTANCE_MIN_OHMS) &&
+          (resistance <= TTJW_PT100_RESISTANCE_MAX_OHMS))
+      {
+        measuredC = ResistanceToTemperature(resistance);
+        if (isfinite(measuredC))
         {
-            OLED_DisplayTemperature(g_latestTemperature);
-            g_displayNeedsRefresh = 0U;
+          /* SFT is maintained internally in Celsius; corrected PV is the
+           * single feedback value used by display, alarm and PID. */
+          correctedC = measuredC + g_errorAdjustment;
+          g_measuredTemperature = measuredC;
+          g_latestTemperature = correctedC;
+          g_sensorValid = 1U;
+          g_errorDisplayActive = 0U;
+          validSample = 1U;
         }
-
-        raw = ADS1220_ReadConversion();
-
-
-        /*
-         * INT32_MIN means DRDY timeout.
-         *
-         * Safety: if the ADC does not provide a valid conversion,
-         * turn the heater OFF.
-         */
-        if (raw != INT32_MIN)
-        {
-            /*
-             * KEEP THE EXISTING RESISTANCE CALCULATION UNCHANGED.
-             */
-            resistance = CalculateResistance(raw);
-
-
-            /*
-             * Convert PT100 resistance to temperature.
-             */
-            temperature = ResistanceToTemperature(resistance);
-
-
-            /*
-             * Apply the signed calibration offset exactly once.
-             * Positive ERROR raises PV; negative ERROR lowers PV.
-             */
-            g_latestTemperature = temperature + g_errorAdjustment;
-
-            /*
-             * Alarm 1 backend:
-             * AL-1 = 0.0 disables Alarm 1.
-             * For AL-1 > 0.0, activate when PV reaches/exceeds AL-1.
-             * The indicator is steady (no blinking) and clears below threshold.
-             */
-            g_alarmActive = ((g_alarm1Value > 0.0f) &&
-                             (g_latestTemperature >= g_alarm1Value)) ? 1U : 0U;
-
-            /*
-             * Heater control. Keep the existing zero-SV and at/above-SV
-             * shutoff behavior. Below SV, calculate PID demand. The output
-             * is clamped and converted by the existing PWM function.
-             */
-            if (g_setValue <= 0.0f)
-            {
-                PID_Reset();
-                Heater_SetDuty(0U);
-            }
-            else if (g_latestTemperature >= g_setValue)
-            {
-                PID_Reset();
-                Heater_SetDuty(0U);
-            }
-            else
-            {
-                Heater_SetDuty(Heater_CalculateDuty(g_latestTemperature));
-            }
-
-            OLED_DisplayTemperature(g_latestTemperature);
-            g_displayNeedsRefresh = 0U;
-        }
-        else
-        {
-            /* ADC timeout = heater OFF and clear accumulated PID state. */
-            PID_Reset();
-            Heater_SetDuty(0U);
-            g_alarmActive = 0U; /* No valid fresh PV to evaluate. */
-        }
+      }
     }
+
+    if (validSample != 0U)
+    {
+      g_alarmActive = TTJW_AlarmEvaluate(g_latestTemperature);
+      HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin,
+          (g_alarmActive != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+#if TTJW_PID_PWM_TEST_MODE
+      /* Bench-test mode: drive PA8 with PID demand. Keep heater power disconnected. */
+      Heater_SetDuty(Heater_CalculateDuty(g_latestTemperature));
+#else
+      /* Production-safe default: power-stage output remains inhibited. */
+      Heater_SetDuty(0U);
+#endif
+    }
+    else
+    {
+      /* ADC timeout or implausible RTD resistance: fail safe. */
+      g_sensorValid = 0U;
+      g_errorDisplayActive = 1U;
+      g_alarmActive = 0U;
+      HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin, GPIO_PIN_RESET);
+      Heater_SetDuty(0U);
+      PID_Reset();
+    }
+
+    TTJW_DisplayUpdate();
+    ADS1220_StartConversion();
+    HAL_Delay(2U);
+  }
 }
 
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    (void)GPIO_Pin;
-}
-
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
 void SystemClock_Config(void)
 {
-    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  /** Configure the main internal regulator output voltage
+  */
+  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 1;
+  RCC_OscInitStruct.PLL.PLLN = 10;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV7;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-    /*
-     * Configure regulator.
-     */
-    if (HAL_PWREx_ControlVoltageScaling(
-            PWR_REGULATOR_VOLTAGE_SCALE1)
-        != HAL_OK)
-    {
-        Error_Handler();
-    }
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-
-    /*
-     * HSI oscillator.
-     */
-    RCC_OscInitStruct.OscillatorType =
-        RCC_OSCILLATORTYPE_HSI;
-
-
-    RCC_OscInitStruct.HSIState =
-        RCC_HSI_ON;
-
-
-    RCC_OscInitStruct.HSICalibrationValue =
-        RCC_HSICALIBRATION_DEFAULT;
-
-
-    RCC_OscInitStruct.PLL.PLLState =
-        RCC_PLL_ON;
-
-
-    RCC_OscInitStruct.PLL.PLLSource =
-        RCC_PLLSOURCE_HSI;
-
-
-    RCC_OscInitStruct.PLL.PLLM =
-        1;
-
-
-    RCC_OscInitStruct.PLL.PLLN =
-        10;
-
-
-    RCC_OscInitStruct.PLL.PLLP =
-        RCC_PLLP_DIV7;
-
-
-    RCC_OscInitStruct.PLL.PLLQ =
-        RCC_PLLQ_DIV2;
-
-
-    RCC_OscInitStruct.PLL.PLLR =
-        RCC_PLLR_DIV2;
-
-
-    if (HAL_RCC_OscConfig(
-            &RCC_OscInitStruct)
-        != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-
-    /*
-     * Clock configuration.
-     */
-    RCC_ClkInitStruct.ClockType =
-        RCC_CLOCKTYPE_HCLK |
-        RCC_CLOCKTYPE_SYSCLK |
-        RCC_CLOCKTYPE_PCLK1 |
-        RCC_CLOCKTYPE_PCLK2;
-
-
-    RCC_ClkInitStruct.SYSCLKSource =
-        RCC_SYSCLKSOURCE_PLLCLK;
-
-
-    RCC_ClkInitStruct.AHBCLKDivider =
-        RCC_SYSCLK_DIV1;
-
-
-    RCC_ClkInitStruct.APB1CLKDivider =
-        RCC_HCLK_DIV1;
-
-
-    RCC_ClkInitStruct.APB2CLKDivider =
-        RCC_HCLK_DIV1;
-
-
-    if (HAL_RCC_ClockConfig(
-            &RCC_ClkInitStruct,
-            FLASH_LATENCY_4)
-        != HAL_OK)
-    {
-        Error_Handler();
-    }
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
-static void MX_I2C1_Init(void)
-{
-    hi2c1.Instance =
-        I2C1;
-
-
-    hi2c1.Init.Timing =
-        0x10D19CE4;
-
-
-    hi2c1.Init.OwnAddress1 =
-        0;
-
-
-    hi2c1.Init.AddressingMode =
-        I2C_ADDRESSINGMODE_7BIT;
-
-
-    hi2c1.Init.DualAddressMode =
-        I2C_DUALADDRESS_DISABLE;
-
-
-    hi2c1.Init.OwnAddress2 =
-        0;
-
-
-    hi2c1.Init.OwnAddress2Masks =
-        I2C_OA2_NOMASK;
-
-
-    hi2c1.Init.GeneralCallMode =
-        I2C_GENERALCALL_DISABLE;
-
-
-    hi2c1.Init.NoStretchMode =
-        I2C_NOSTRETCH_DISABLE;
-
-
-    if (HAL_I2C_Init(&hi2c1)
-        != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-
-    if (HAL_I2CEx_ConfigAnalogFilter(
-            &hi2c1,
-            I2C_ANALOGFILTER_ENABLE)
-        != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-
-    if (HAL_I2CEx_ConfigDigitalFilter(
-            &hi2c1,
-            0)
-        != HAL_OK)
-    {
-        Error_Handler();
-    }
-}
-
+/**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_SPI1_Init(void)
 {
-    hspi1.Instance =
-        SPI1;
 
+  /* USER CODE BEGIN SPI1_Init 0 */
 
-    hspi1.Init.Mode =
-        SPI_MODE_MASTER;
+  /* USER CODE END SPI1_Init 0 */
 
+  /* USER CODE BEGIN SPI1_Init 1 */
 
-    hspi1.Init.Direction =
-        SPI_DIRECTION_2LINES;
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 7;
+  hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
 
+  /* USER CODE END SPI1_Init 2 */
 
-    hspi1.Init.DataSize =
-        SPI_DATASIZE_8BIT;
-
-
-    /*
-     * SPI Mode 1:
-     *
-     * CPOL = 0
-     * CPHA = 1
-     */
-    hspi1.Init.CLKPolarity =
-        SPI_POLARITY_LOW;
-
-
-    hspi1.Init.CLKPhase =
-        SPI_PHASE_2EDGE;
-
-
-    hspi1.Init.NSS =
-        SPI_NSS_SOFT;
-
-
-    hspi1.Init.BaudRatePrescaler =
-        SPI_BAUDRATEPRESCALER_64;
-
-
-    hspi1.Init.FirstBit =
-        SPI_FIRSTBIT_MSB;
-
-
-    hspi1.Init.TIMode =
-        SPI_TIMODE_DISABLE;
-
-
-    hspi1.Init.CRCCalculation =
-        SPI_CRCCALCULATION_DISABLE;
-
-
-    hspi1.Init.CRCPolynomial =
-        7;
-
-
-    hspi1.Init.CRCLength =
-        SPI_CRC_LENGTH_DATASIZE;
-
-
-    hspi1.Init.NSSPMode =
-        SPI_NSS_PULSE_DISABLE;
-
-
-    if (HAL_SPI_Init(&hspi1)
-        != HAL_OK)
-    {
-        Error_Handler();
-    }
 }
 
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM1_Init(void)
 {
-    TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-    TIM_MasterConfigTypeDef sMasterConfig = {0};
-    TIM_OC_InitTypeDef sConfigOC = {0};
-    TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
-    htim1.Instance = TIM1;
-    htim1.Init.Prescaler = 7999;
-    htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim1.Init.Period = 19999;
-    htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-    htim1.Init.RepetitionCounter = 0;
-    htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  /* USER CODE BEGIN TIM1_Init 0 */
 
-    if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
-    {
-        Error_Handler();
-    }
+  /* USER CODE END TIM1_Init 0 */
 
-    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
-    if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
-    {
-        Error_Handler();
-    }
+  /* USER CODE BEGIN TIM1_Init 1 */
 
-    if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
-    {
-        Error_Handler();
-    }
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 7999;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 19999;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.BreakFilter = 0;
+  sBreakDeadTimeConfig.Break2State = TIM_BREAK2_DISABLE;
+  sBreakDeadTimeConfig.Break2Polarity = TIM_BREAK2POLARITY_HIGH;
+  sBreakDeadTimeConfig.Break2Filter = 0;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
 
-    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-    sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
-    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
 
-    if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    sConfigOC.OCMode = TIM_OCMODE_PWM1;
-    sConfigOC.Pulse = 0;
-    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-    sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-    sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-    sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-
-    if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-    sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-    sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-    sBreakDeadTimeConfig.DeadTime = 0;
-    sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-    sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-    sBreakDeadTimeConfig.BreakFilter = 0;
-    sBreakDeadTimeConfig.Break2State = TIM_BREAK2_DISABLE;
-    sBreakDeadTimeConfig.Break2Polarity = TIM_BREAK2POLARITY_HIGH;
-    sBreakDeadTimeConfig.Break2Filter = 0;
-    sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-
-    if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
-    {
-        Error_Handler();
-    }
-
-    HAL_TIM_MspPostInit(&htim1);
 }
 
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_GPIO_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
 
+  /* USER CODE END MX_GPIO_Init_1 */
 
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_GPIOH_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, KEY_L1_Pin|KEY_L2_Pin, GPIO_PIN_SET);
 
-    /* Initial keypad columns HIGH. */
-    HAL_GPIO_WritePin(
-        GPIOC,
-        KEY_L1_Pin | KEY_L2_Pin,
-        GPIO_PIN_SET
-    );
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, ADS_CS_Pin|PV_TM_CLK_Pin|PV_TM_DIO_Pin, GPIO_PIN_SET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(ALARM_LED_GPIO_Port, ALARM_LED_Pin, GPIO_PIN_RESET);
 
-    /* ADS1220 CS HIGH. */
-    HAL_GPIO_WritePin(
-        ADS_CS_GPIO_Port,
-        ADS_CS_Pin,
-        GPIO_PIN_SET
-    );
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, SV_TM_CLK_Pin|SV_TM_DIO_Pin, GPIO_PIN_SET);
 
+  /*Configure GPIO pin : B1_Pin */
+  GPIO_InitStruct.Pin = B1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-    /* B1. */
-    GPIO_InitStruct.Pin = B1_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+  /*Configure GPIO pins : KEY_L1_Pin KEY_L2_Pin */
+  GPIO_InitStruct.Pin = KEY_L1_Pin|KEY_L2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    HAL_GPIO_Init(
-        B1_GPIO_Port,
-        &GPIO_InitStruct
-    );
+  /*Configure GPIO pins : KEY_R1_Pin KEY_R2_Pin */
+  GPIO_InitStruct.Pin = KEY_R1_Pin|KEY_R2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
+  /*Configure GPIO pins : ADS_CS_Pin PV_TM_CLK_Pin PV_TM_DIO_Pin */
+  GPIO_InitStruct.Pin = ADS_CS_Pin|PV_TM_CLK_Pin|PV_TM_DIO_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    /* Keypad columns: PC0 / PC1. */
-    GPIO_InitStruct.Pin =
-        KEY_L1_Pin |
-        KEY_L2_Pin;
+  /*Configure GPIO pin : PUSH_BUTTON_Pin */
+  GPIO_InitStruct.Pin = PUSH_BUTTON_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(PUSH_BUTTON_GPIO_Port, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Mode =
-        GPIO_MODE_OUTPUT_PP;
+  /*Configure GPIO pin : ADS_DRDY_Pin */
+  GPIO_InitStruct.Pin = ADS_DRDY_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(ADS_DRDY_GPIO_Port, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pull =
-        GPIO_NOPULL;
+  /*Configure GPIO pins : ALARM_LED_Pin SV_TM_CLK_Pin SV_TM_DIO_Pin */
+  GPIO_InitStruct.Pin = ALARM_LED_Pin|SV_TM_CLK_Pin|SV_TM_DIO_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Speed =
-        GPIO_SPEED_FREQ_LOW;
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
 
-    HAL_GPIO_Init(
-        GPIOC,
-        &GPIO_InitStruct
-    );
+  HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI2_IRQn);
 
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
-    /* Keypad rows: PC2 / PC3. */
-    GPIO_InitStruct.Pin =
-        KEY_R1_Pin |
-        KEY_R2_Pin;
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
-    GPIO_InitStruct.Mode =
-        GPIO_MODE_IT_FALLING;
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
 
-    GPIO_InitStruct.Pull =
-        GPIO_PULLUP;
-
-    HAL_GPIO_Init(
-        GPIOC,
-        &GPIO_InitStruct
-    );
-
-
-    /* ADS1220 CS. */
-    GPIO_InitStruct.Pin =
-        ADS_CS_Pin;
-
-    GPIO_InitStruct.Mode =
-        GPIO_MODE_OUTPUT_PP;
-
-    GPIO_InitStruct.Pull =
-        GPIO_NOPULL;
-
-    GPIO_InitStruct.Speed =
-        GPIO_SPEED_FREQ_LOW;
-
-    HAL_GPIO_Init(
-        ADS_CS_GPIO_Port,
-        &GPIO_InitStruct
-    );
-
-
-    /* Existing push button. */
-    GPIO_InitStruct.Pin =
-        PUSH_BUTTON_Pin;
-
-    GPIO_InitStruct.Mode =
-        GPIO_MODE_IT_FALLING;
-
-    GPIO_InitStruct.Pull =
-        GPIO_PULLUP;
-
-    HAL_GPIO_Init(
-        PUSH_BUTTON_GPIO_Port,
-        &GPIO_InitStruct
-    );
-
-
-    /* ADS1220 DRDY. */
-    GPIO_InitStruct.Pin =
-        ADS_DRDY_Pin;
-
-    GPIO_InitStruct.Mode =
-        GPIO_MODE_INPUT;
-
-    GPIO_InitStruct.Pull =
-        GPIO_NOPULL;
-
-    HAL_GPIO_Init(
-        ADS_DRDY_GPIO_Port,
-        &GPIO_InitStruct
-    );
-
-
-    /* EXTI. */
-    HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-
-    HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(EXTI2_IRQn);
-
-    HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(EXTI3_IRQn);
-
-    HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
-    HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
-    __disable_irq();
-
-
-    while (1)
-    {
-    }
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-    /* Add board-specific assertion reporting here if needed. */
-    (void)file;
-    (void)line;
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
-#endif
+#endif /* USE_FULL_ASSERT */

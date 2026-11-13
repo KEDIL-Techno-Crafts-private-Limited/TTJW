@@ -2,7 +2,6 @@
 #include "main.h"
 #include "ttjw_config.h"
 #include "ads1220.h"
-#include "keypad.h"
 #include <stdint.h>
 #include <limits.h>
 
@@ -156,9 +155,6 @@ int32_t ADS1220_ReadConversion(void)
                ADS_DRDY_GPIO_Port,
                ADS_DRDY_Pin) == GPIO_PIN_SET)
     {
-        /* Keep keypad scanning alive during the ~20 SPS conversion wait. */
-        Keypad_Process();
-
         if ((HAL_GetTick() - startTime) >
             ADS_DRDY_TIMEOUT_MS)
         {

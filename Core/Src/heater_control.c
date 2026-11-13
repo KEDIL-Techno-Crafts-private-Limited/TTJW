@@ -49,12 +49,14 @@ void Heater_SetDuty(uint8_t dutyPercent)
     compare =
         ((uint32_t)HEATER_PWM_PERIOD * dutyPercent) / 100U;
 
-    /* CCR = ARR + 1 gives a continuous ON output at 100% in PWM mode 1. */
-    if (dutyPercent >= 100U)
-    {
-        compare = HEATER_PWM_PERIOD + 1U;
-    }
-    else if (compare > HEATER_PWM_PERIOD)
+    /*
+     * Preserve the reference firmware's compare calculation at 100%:
+     * CCR = ARR (19999), not ARR + 1 (20000).
+     * With ARR=19999 and a 10 kHz timer counter, this leaves one
+     * counter tick LOW per 20000-tick / 2-second cycle (about 100 us).
+     * This is the short recurring LOW dip visible in the reference PWM.
+     */
+    if (compare > HEATER_PWM_PERIOD)
     {
         compare = HEATER_PWM_PERIOD;
     }
