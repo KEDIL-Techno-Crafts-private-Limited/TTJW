@@ -39,9 +39,6 @@
 - Above setpoint, the current PID implementation commands 0% output.
 - Sensor invalidity commands 0% output.
 
-## Important validation status
-The project ZIP structure is verified. It has not been compiled with the target toolchain or tested on physical hardware in this environment. Import into STM32CubeIDE, build, flash, and verify all functions on the board before review or use.
-
 ## Import
 Import the extracted project folder into STM32CubeIDE as an existing STM32 project.
 
